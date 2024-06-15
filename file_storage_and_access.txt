@@ -1,0 +1,299 @@
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.security.Key;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Base64;
+import java.util.Scanner;
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+
+public class FileStorageJDBC {
+
+    private static final String JDBC_URL = "jdbc:mysql://localhost:3306/files";
+    private static final String JDBC_USER = "root";
+    private static final String JDBC_PASSWORD = "root123";
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+
+        System.out.println("1. Login\n2. Register");
+        int choice = scanner.nextInt();
+        scanner.nextLine();  // Consume the newline character
+
+        switch (choice) {
+            case 1:
+                login(scanner);
+                break;
+
+            case 2:
+                registerUser(scanner);
+                System.out.println("User registered successfully!");
+                break;
+
+            default:
+                System.out.println("Invalid choice. Exiting...");
+        }
+
+        // Close the Scanner
+        scanner.close();
+    }
+
+    private static void login(Scanner scanner) {
+        System.out.println("Enter your username:");
+        String loginUsername = scanner.nextLine();
+
+        System.out.println("Enter your password:");
+        String loginPassword = scanner.nextLine();
+
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD)) {
+            // Authenticate user
+            if (authenticateUser(connection, loginUsername, loginPassword)) {
+                System.out.println("Authentication successful!");
+                // Allow the authenticated user to manage files
+                manageFiles(connection, loginUsername, scanner);
+            } else {
+                System.out.println("Authentication failed. Exiting...");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private static void registerUser(Scanner scanner) {
+        System.out.println("Enter a new username:");
+        String newUsername = scanner.nextLine();
+
+        System.out.println("Set a password:");
+        String newPassword = scanner.nextLine();
+
+        // Register new user
+        registerUser(newUsername, newPassword);
+    }
+
+    private static void manageFiles(Connection connection, String username, Scanner scanner) {
+        int option;
+        do {
+            System.out.println("\nMenu:");
+            System.out.println("1. Add a file");
+            System.out.println("2. Delete a file");
+            System.out.println("3. Exit");
+            System.out.print("Enter your option (1-3): ");
+
+            // Read user's choice
+            option = scanner.nextInt();
+            scanner.nextLine(); // Consume the newline character
+
+            // Perform actions based on user's choice
+            switch (option) {
+                case 1:
+                    // Option to add a file
+                    System.out.print("Enter the filename to add: ");
+                    String filenameToAdd = scanner.nextLine();
+                    addFileToDatabase(filenameToAdd, username);
+                    System.out.println("File added successfully.");
+                    break;
+
+                case 2:
+                    // Option to delete a file
+                    System.out.print("Enter the filename to delete: ");
+                    String filenameToDelete = scanner.nextLine();
+                    deleteFileFromDatabase(connection, filenameToDelete, username);
+                    System.out.println("File deleted successfully.");
+                    break;
+
+                case 3:
+                    System.out.println("Exiting the program. Goodbye!");
+                    break;
+
+                default:
+                    System.out.println("Invalid choice. Please enter a number between 1 and 3.");
+            }
+
+        } while (option != 3);
+    }
+
+
+    private static void addFileToDatabase(String filename, String username) {
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD)) {
+            // Generate a random encryption key
+            Key encryptionKey = generateEncryptionKey();
+
+            // Read file content
+            byte[] fileContent = readFile(filename);
+
+            // Encrypt file content
+            byte[] encryptedContent = encrypt(fileContent, encryptionKey);
+
+            // Save metadata and encrypted content to the database
+            saveToDatabase(connection, filename, encryptedContent, encryptionKey, username);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    
+
+    private static boolean authenticateUser(Connection connection, String username, String password) {
+        try {
+            String query = "SELECT * FROM users WHERE username = ? AND password = ?";
+            try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
+                preparedStatement.setString(1, username);
+                preparedStatement.setString(2, password);
+                try (ResultSet resultSet = preparedStatement.executeQuery()) {
+                    return resultSet.next();
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+
+    private static void registerUser(String username, String password) {
+        try (Connection connection = DriverManager.getConnection(JDBC_URL, JDBC_USER, JDBC_PASSWORD)) {
+            if (!userExists(connection, username)) {
+                String query = "INSERT INTO users (username, password) VALUES (?, ?)";
+                try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
+                    preparedStatement.setString(1, username);
+                    preparedStatement.setString(2, password);
+                    preparedStatement.executeUpdate();
+                }
+            } else {
+                System.out.println("User with the given username already exists.");
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static boolean userExists(Connection connection, String username) throws SQLException {
+        String query = "SELECT * FROM users WHERE username = ?";
+        try (PreparedStatement preparedStatement = connection.prepareStatement(query)) {
+            preparedStatement.setString(1, username);
+            try (ResultSet resultSet = preparedStatement.executeQuery()) {
+                return resultSet.next();
+            }
+        }
+    }
+
+    private static void saveToDatabase(Connection connection, String filename, byte[] encryptedContent, Key encryptionKey, String username) {
+        try {
+        	System.out.println(username);     // Save file metadata to the 'file_metadata' table
+           int fileId= saveFileMetadata(connection, filename, encryptedContent.length, encryptionKey, username);
+
+            // Save file content to the 'file_content' table
+            saveFileContent(connection, encryptedContent,fileId);
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static int saveFileMetadata(Connection connection, String filename, int fileSize, Key encryptionKey, String username) throws SQLException {
+        String insertMetadataSQL = "INSERT INTO file_metadata (filename, file_size, encryption_key, username) VALUES (?, ?, ?, ?)";
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(insertMetadataSQL, Statement.RETURN_GENERATED_KEYS)) {
+            preparedStatement.setString(1, filename);
+            preparedStatement.setInt(2, fileSize);
+            preparedStatement.setString(3, Base64.getEncoder().encodeToString(encryptionKey.getEncoded()));
+            preparedStatement.setString(4, username);
+
+            int affectedRows = preparedStatement.executeUpdate();
+
+            if (affectedRows == 0) {
+                throw new SQLException("Inserting file metadata failed, no rows affected.");
+            }
+
+            try (ResultSet generatedKeys = preparedStatement.getGeneratedKeys()) {
+                if (generatedKeys.next()) {
+                    // Retrieve the auto-generated file ID if needed
+                    int fileId = generatedKeys.getInt(1);
+                    return fileId;
+                    // Do something with the file ID if needed
+                } else {
+                    throw new SQLException("Inserting file metadata failed, no ID obtained.");
+               
+                }
+            }
+        }
+
+    }
+    private static void saveFileContent(Connection connection, byte[] encryptedContent, int fileId) throws SQLException {
+        String insertContentSQL = "INSERT INTO file_content (file_id, content) VALUES (?, ?)";
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(insertContentSQL)) {
+            preparedStatement.setInt(1, fileId);
+            preparedStatement.setBytes(2, encryptedContent);
+            preparedStatement.executeUpdate();
+        }
+    }
+
+
+    private static void deleteFileFromDatabase(Connection connection, String filename, String username) {
+        try {
+        	 // Delete file content
+            deleteFileContent(connection, filename);
+            // Delete file metadata
+            deleteFileMetadata(connection, filename, username);
+
+           
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private static void deleteFileMetadata(Connection connection, String filename, String username) {
+        String deleteMetadataSQL = "DELETE FROM file_metadata WHERE filename = ? AND username = ?";
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(deleteMetadataSQL)) {
+            preparedStatement.setString(1, filename);
+            preparedStatement.setString(2, username);
+            preparedStatement.executeUpdate();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private static void deleteFileContent(Connection connection, String filename) {
+        String deleteContentSQL = "DELETE FROM file_content WHERE file_id IN (SELECT file_id FROM file_metadata WHERE filename = ?)";
+
+        try (PreparedStatement preparedStatement = connection.prepareStatement(deleteContentSQL)) {
+            preparedStatement.setString(1, filename);
+
+            preparedStatement.executeUpdate();
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+
+
+    private static Key generateEncryptionKey() throws Exception {
+        KeyGenerator keyGenerator = KeyGenerator.getInstance("AES");
+        keyGenerator.init(256);
+        return keyGenerator.generateKey();
+    }
+
+    private static byte[] readFile(String filePath) throws IOException {
+        try (InputStream inputStream = new FileInputStream(filePath)) {
+            byte[] buffer = new byte[inputStream.available()];
+            inputStream.read(buffer);
+            return buffer;
+        }
+    }
+
+    private static byte[] encrypt(byte[] content, Key key) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES");
+        cipher.init(Cipher.ENCRYPT_MODE, key);
+        return cipher.doFinal(content);
+    }
+}
